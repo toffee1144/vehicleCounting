@@ -1,23 +1,10 @@
 from flask import Flask, Response
 import cv2
-from detection import frame_lock, current_frame
+from detection import generate_frames
 import mysql.connector
 
 app = Flask(__name__)
 appData = Flask(__name__)
-
-def generate_frames():
-    global current_frame
-    while True:
-        with frame_lock:
-            if current_frame is None:
-                continue
-            ret, buffer = cv2.imencode('.jpg', current_frame)
-            if not ret:
-                continue
-        frame_data = buffer.tobytes()
-        yield (b'--frame\r\n'
-               b'Content-Type: image/jpeg\r\n\r\n' + frame_data + b'\r\n')
 
 @app.route('/video')
 def video_feed():

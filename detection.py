@@ -1,59 +1,21 @@
 import cv2
-import argparse
-import numpy as np
-import gi
-import sys
-import os
 import time
+import numpy as np
 import threading
-from flask import Flask, Response
-import hailo
-import mysql.connector  # pip install mysql-connector-python
-import datetime
-import pytz  # install via pip if needed: pip install pytz
+import gi
+import hailo  # Make sure the Hailo SDK is installed and accessible
 
 gi.require_version('Gst', '1.0')
 from gi.repository import Gst, GLib, GObject
 
-app = Flask(__name__)
+# Global variables used for detection.
+POLYGON_1 = np.array([(61, 438), (241, 397), (373, 616), (145, 620)], np.int32)
+counted_ids = {}
+previous_centers = {}
+
+# These globals will be used by both detection and the Flask app.
 frame_lock = threading.Lock()
 current_frame = None
-jakarta_tz = pytz.timezone("Asia/Jakarta")
-POLYGON_1 = np.array([(61, 438), (241, 397), (373, 616), (145, 620)], np.int32)
-previous_centers = {}
-counted_ids = {}
-rtsp_link = None
-
-# Global buffer to store data if database connection fails.
-offline_data = []
-
-def flush_offline_data(cursor, conn):
-    """Attempt to flush any data stored offline to the database."""
-    global offline_data
-    for data in offline_data:
-        sql = """
-            INSERT INTO counting (car, motorcycle, bus, truck, time)
-            VALUES (%s, %s, %s, %s, %s)
-        """
-        values = (data['car'], data['motorcycle'], data['bus'], data['truck'], data['time'])
-        cursor.execute(sql, values)
-        conn.commit()
-    if offline_data:
-        print("Flushed offline data:", offline_data)
-    offline_data = []
-
-def handle_database_error(car, motorcycle, bus, truck, current_timestamp, ):
-    """Store the current counts in an offline buffer for later insertion."""
-    global offline_data
-    data = {
-        'car': car,
-        'motorcycle': motorcycle,
-        'bus': bus,
-        'truck': truck,
-        'time': current_timestamp
-    }
-    offline_data.append(data)
-    print("Stored data offline due to database error:", data)
 
 class HailoDetectionApp:
     def __init__(self, rtsp_url):
@@ -62,8 +24,8 @@ class HailoDetectionApp:
         self.running = True
         self.hef_path = "/home/pi/Documents/hailo-rpi5-examples/basic_pipelines/yolov11s.hef"
         self.post_process_so = "/home/pi/Videos/OpenCV/libyolo_hailortpp_postprocess.so"
-        self.nms_score_threshold = 0.4  # Adjust threshold as needed
-        self.nms_iou_threshold = 0.5    # Adjust threshold as needed
+        self.nms_score_threshold = 0.4
+        self.nms_iou_threshold = 0.5
         self.tracked_classes = {4: "motorcycle", 8: "truck", 6: "bus", 3: "car"}
         self.last_time = time.time()
         self.fps = 0
@@ -75,12 +37,22 @@ class HailoDetectionApp:
         self.blink_status = False  
         self.last_detection_time = 0
         self.blink_duration = 0.15  
-        self.blink_interval = 0.15  
+        self.blink_interval = 0.15
+        self.running = True
+        self.reconnecting = False  # Flag to track reconnection status
 
         Gst.init(None)
         self.create_pipeline()
 
     def create_pipeline(self):
+        if hasattr(self, 'pipeline'):
+            self.pipeline.set_state(Gst.State.NULL)
+            del self.pipeline
+
+        global counted_ids, previous_centers
+        counted_ids.clear()
+        previous_centers.clear()
+
         pipeline_str = (
             f'rtspsrc location={self.rtsp_url} latency=0 ! '
             'queue name=source_queue_decode leaky=no max-size-buffers=3 max-size-bytes=0 max-size-time=0 ! '
@@ -134,17 +106,33 @@ class HailoDetectionApp:
     def on_bus_message(self, bus, message):
         if message.type == Gst.MessageType.ERROR:
             err, debug = message.parse_error()
-            print("RTSP Error:", err, debug)
-            self.handle_rtsp_error(err)
+            print(f"RTSP Error: {err} - {debug}")
+            if not self.reconnecting:
+                GLib.idle_add(self.handle_error_and_reconnect)
 
-    def handle_rtsp_error(self, error):
-        """Handle errors from the RTSP source by attempting to restart the pipeline."""
-        print("Handling RTSP error, attempting to restart pipeline in 5 seconds...")
-        time.sleep(5)
+    def handle_error_and_reconnect(self):
+        print("Handling error and reconnecting...")
+        self.reconnecting = True
         self.pipeline.set_state(Gst.State.NULL)
-        self.pipeline.set_state(Gst.State.PLAYING)
+        self.schedule_reconnect()
+        return False
+
+    def schedule_reconnect(self):
+        GLib.timeout_add(5000, self.try_reconnect)
+
+    def try_reconnect(self):
+        print("Attempting to reconnect...")
+        try:
+            self.create_pipeline()  # Recreate the pipeline
+            self.pipeline.set_state(Gst.State.PLAYING)
+            self.reconnecting = False
+            return False
+        except Exception as e:
+            print(f"Reconnection failed: {str(e)}")
+            return True  # Continue retrying
 
     def is_inside_polygon(self, bbox, polygon):
+        """Check if any key point of a bounding box is inside the polygon."""
         x_min, y_min, x_max, y_max = bbox
         center_x = (x_min + x_max) // 2
         center_y = (y_min + y_max) // 2
@@ -156,14 +144,16 @@ class HailoDetectionApp:
             (x_max, y_max),
             (center_x, center_y)
         ]
-
         for point in points:
             if cv2.pointPolygonTest(polygon, point, False) >= 0:
                 return True
         return False
 
     def on_new_sample(self, sink):
-        global current_frame
+        if self.reconnecting or not self.pipeline:
+            return Gst.FlowReturn.OK
+        
+        global current_frame, frame_lock, counted_ids, previous_centers
         sample = sink.emit('pull-sample')
         if not sample:
             return Gst.FlowReturn.ERROR
@@ -177,6 +167,11 @@ class HailoDetectionApp:
             return Gst.FlowReturn.ERROR
 
         try:
+            current_state = self.pipeline.get_state(0).state
+            if current_state != Gst.State.PLAYING:
+                return Gst.FlowReturn.OK
+
+            # Process frame only if pipeline is active
             frame = np.ndarray(
                 shape=(720, 1280, 3),
                 dtype=np.uint8,
@@ -188,7 +183,7 @@ class HailoDetectionApp:
             self.fps = 1 / (current_time - self.last_time)
             self.last_time = current_time
 
-            # Get detections via Hailo SDK.
+            # Get detections via the Hailo SDK.
             roi = hailo.get_roi_from_buffer(buffer)
             detections = roi.get_objects_typed(hailo.HAILO_DETECTION)
             self.detections.clear()
@@ -202,7 +197,8 @@ class HailoDetectionApp:
                 label = self.tracked_classes[label_id]
                 track = detection.get_objects_typed(hailo.HAILO_UNIQUE_ID)
                 object_id = track[0] if track else None
-                x1, y1, x2, y2 = map(int, [bbox.xmin() * 1280, bbox.ymin() * 720, bbox.xmax() * 1280, bbox.ymax() * 720])
+                x1, y1, x2, y2 = map(int, [bbox.xmin() * 1280, bbox.ymin() * 720,
+                                            bbox.xmax() * 1280, bbox.ymax() * 720])
                 
                 if object_id is not None:
                     self.detections.append((x1, y1, x2, y2, label, confidence, object_id))
@@ -251,12 +247,24 @@ class HailoDetectionApp:
 
             with frame_lock:
                 current_frame = frame
+
+            try:
+                roi = hailo.get_roi_from_buffer(buffer)
+                detections = roi.get_objects_typed(hailo.HAILO_DETECTION)
+            except Exception as e:
+                print(f"Hailo processing error: {str(e)}")
+                return Gst.FlowReturn.ERROR
+
+
+        except Exception as e:
+            print(f"Frame processing error: {str(e)}")
         finally:
             buffer.unmap(map_info)
         
         return Gst.FlowReturn.OK
 
     def draw_detections(self, frame):
+        """Draw bounding boxes and labels on the frame."""
         for x1, y1, x2, y2, label, score, object_id in self.detections:
             cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
             label_text = f"{label}: {score:.2f}"
@@ -270,6 +278,7 @@ class HailoDetectionApp:
                     cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
 
     def run(self):
+        """Start the GStreamer pipeline."""
         self.pipeline.set_state(Gst.State.PLAYING)
         try:
             self.loop.run()
@@ -278,8 +287,10 @@ class HailoDetectionApp:
 
     def stop(self):
         self.running = False
-        self.pipeline.set_state(Gst.State.NULL)
-        self.loop.quit()
+        if hasattr(self, 'pipeline'):
+            self.pipeline.set_state(Gst.State.NULL)
+        if hasattr(self, 'loop'):
+            self.loop.quit()
 
 def generate_frames():
     global current_frame
@@ -293,103 +304,3 @@ def generate_frames():
         frame_data = buffer.tobytes()
         yield (b'--frame\r\n'
                b'Content-Type: image/jpeg\r\n\r\n' + frame_data + b'\r\n')
-
-@app.route('/video')
-def video_feed():
-    return Response(generate_frames(), mimetype='multipart/x-mixed-replace; boundary=frame')
-
-def mysql_insertion_loop(app_instance):
-    while True:
-        time.sleep(5)
-        car = app_instance.car_crossed_count
-        motorcycle = app_instance.motorcycle_crossed_count
-        bus = app_instance.bus_crossed_count
-        truck = app_instance.truck_crossed_count
-        current_timestamp = datetime.datetime.now(jakarta_tz)
-        try:
-            conn = mysql.connector.connect(
-                host="localhost",
-                user="root",
-                password="telkomiot123",
-                database="AI_Vehicle"
-            )
-            cursor = conn.cursor()
-            # Flush any stored offline data.
-            if offline_data:
-                flush_offline_data(cursor, conn)
-            cursor.execute("SELECT id, DATE(time) FROM counting ORDER BY time DESC LIMIT 1")
-            result = cursor.fetchone()
-            if result:
-                last_date = result
-                if last_date == current_timestamp.date():
-                    sql = """
-                        INSERT counting
-                        SET car = car + %s,
-                            motorcycle = motorcycle + %s,
-                            bus = bus + %s,
-                            truck = truck + %s,
-                            time = %s
-                    """
-                    values = (car, motorcycle, bus, truck, current_timestamp)
-                    cursor.execute(sql, values)
-                else:
-                    sql = """
-                        INSERT INTO counting ( car, motorcycle, bus, truck, time)
-                        VALUES (%s, %s, %s, %s, %s)
-                    """
-                    values = (car, motorcycle, bus, truck, current_timestamp)
-                    cursor.execute(sql, values)
-            else:
-                sql = """
-                    INSERT INTO counting (car, motorcycle, bus, truck, time)
-                    VALUES (%s, %s, %s, %s, %s)
-                """
-                values = (car, motorcycle, bus, truck, current_timestamp)
-                cursor.execute(sql, values)
-            conn.commit()
-            print("Updated data in MySQL:", car, motorcycle, bus, truck, "at", current_timestamp)
-            cursor.close()
-            conn.close()
-            # Reset counts after a successful update.
-            app_instance.car_crossed_count = 0
-            app_instance.motorcycle_crossed_count = 0
-            app_instance.bus_crossed_count = 0
-            app_instance.truck_crossed_count = 0
-        except Exception as e:
-            handle_database_error(car, motorcycle, bus, truck, current_timestamp)
-
-if __name__ == '__main__':
-    def get_rtsp_link_from_db():
-        try:
-            conn = mysql.connector.connect(
-                host="localhost",
-                user="root",
-                password="telkomiot123",
-                database="AI_Vehicle"
-            )
-            cursor = conn.cursor()
-            cursor.execute("SELECT link FROM rtspLink LIMIT 1")
-            result = cursor.fetchone()
-            cursor.close()
-            conn.close()
-            if result:
-                return result[0]
-            else:
-                print("No RTSP link found in the database.")
-                return None
-        except Exception as e:
-            print("Error retrieving RTSP link from database:", e)
-            return None
-
-    while rtsp_link is None:
-        rtsp_link = get_rtsp_link_from_db()
-        if rtsp_link is None:
-            print("No RTSP link found. Waiting for the data...")
-            time.sleep(5)  # Wait 5 seconds before trying again
-            
-    hailo_app = HailoDetectionApp(rtsp_link)
-    hailo_thread = threading.Thread(target=hailo_app.run, daemon=True)
-    hailo_thread.start()
-    mysql_thread = threading.Thread(target=mysql_insertion_loop, args=(hailo_app,), daemon=True)
-    mysql_thread.start()
-    app.run(host='0.0.0.0', port=5000, debug=False, threaded=True)

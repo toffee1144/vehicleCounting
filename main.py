@@ -26,13 +26,13 @@ def main():
     hailo_thread = threading.Thread(target=hailo_app.run, daemon=True)
     hailo_thread.start()
 
-    # Start the MySQL insertion thread.
-    mysql_thread = threading.Thread(target=mysql_insertion_loop, args=(hailo_app,), daemon=True)
-    mysql_thread.start()
-
     # Start the video streaming Flask app on port 5000.
     video_thread = threading.Thread(target=run_video_app, daemon=True)
     video_thread.start()
+
+    # Start the MySQL insertion thread.
+    mysql_thread = threading.Thread(target=mysql_insertion_loop, args=(hailo_app,), daemon=True)
+    mysql_thread.start()
 
     # Start the data API Flask app on port 5001.
     data_thread = threading.Thread(target=run_data_app, daemon=True)
