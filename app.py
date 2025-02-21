@@ -1,30 +1,104 @@
-from flask import Flask, Response
+from flask import Flask, Response, jsonify, request, url_for
 import cv2
-from detection import generate_frames
+from detection import generate_frames, StreamGenerator
+import devInfo
 import mysql.connector
+import platform
+import datetime
+import uuid
+import platform
+from database import get_rtsp_link_from_db, get_data_all, get_data_summary, get_playback_rtsp_link
+import subprocess
+import threading
+import time
 
 app = Flask(__name__)
 appData = Flask(__name__)
 
-@app.route('/video')
+playback_links = {}
+
+@app.route('/device/api/v1/stream/live')
 def video_feed():
     return Response(generate_frames(), mimetype='multipart/x-mixed-replace; boundary=frame')
 
-@appData.route('/data', methods=['GET'])
-def get_vehicles():
-    try:
-        conn = mysql.connector.connect(
-            host="localhost",
-            user="root",
-            password="telkomiot123",
-            database="AI_Vehicle"
-        )
-        cursor = conn.cursor(dictionary=True)
-        cursor.execute("SELECT * FROM counting")  # Adjust the table name if needed
-        rows = cursor.fetchall()
-        cursor.close()
-        conn.close()
-        return rows
-    except Exception as e:
-        print("Error retrieving vehicle data from database:", e)
-        return []
+@appData.route('/device/api/v1/disk', methods=['GET'])
+def get_disk_info():
+    disk_data = {
+        'Uptime': devInfo.get_uptime(),          # Call the function
+        'Memory': devInfo.get_memory_info(),       # Call the function
+        'Disk': devInfo.get_disk_info(),            # Call the function
+        'CPU Temp': devInfo.get_cpu_temp(),         # Call the function
+        'Hailo Temp': devInfo.get_hailo_temp()     # Call the function
+    }
+    return jsonify(disk_data)
+
+@appData.route('/device/api/v1/info', methods=['GET'])
+def get_raspi_info():
+    raspi_info = {
+        'Hostname': platform.node(),
+        'Operating System': f"{platform.system()} {platform.release()}",
+        'IP Address': devInfo.get_ip_address(),
+        'MAC Address Ethernet': devInfo.get_mac_address('eth0'),
+        'MAC Address WiFi': devInfo.get_mac_address('eth0'),
+        'Device Serial': devInfo.get_device_serial(),
+        'Hailo Device Info': devInfo.get_hailo_device_info(),
+    }
+    return jsonify(raspi_info)
+
+@appData.route('/device/api/v1/speedtest', methods=['GET'])
+def get_speedtest_info():
+    speedtest_info = {
+        'Speedtest': devInfo.get_speed_test()
+    }
+    return jsonify(speedtest_info)
+
+@appData.route('/device/api/v1/data/all', methods=['GET'])
+def get_data_all_info():
+    return jsonify(get_data_all())
+
+@appData.route('/device/api/v1/data/summary', methods=['GET'])
+def get_data_summary_info():
+    return jsonify(get_data_summary())
+
+@appData.route('/device/api/v1/stream/playback', methods=['GET', 'POST'])
+def playback():
+    if request.method == 'POST':
+        datetime_str = request.form['datetime']
+        playback_id = str(uuid.uuid4())
+        playback_links[playback_id] = {
+            'datetime': datetime_str,
+            'expires_at': datetime.datetime.now() + datetime.timedelta(minutes=3)
+        }
+        return jsonify({'playback_link': url_for('playback_stream', playback_id=playback_id, _external=True)})
+    return '''
+        <form method="post">
+            DateTime: <input type="datetime-local" name="datetime">
+            <input type="submit" value="Generate">
+        </form>
+    '''
+
+@appData.route('/device/api/v1/stream/playback/<playback_id>', methods=['GET'])
+def playback_stream(playback_id):
+    if playback_id not in playback_links:
+        return "Playback link not found", 404
+    playback_info = playback_links[playback_id]
+    if datetime.datetime.now() > playback_info['expires_at']:
+        del playback_links[playback_id]
+        return "Playback link expired", 410
+    datetime_str = playback_info['datetime']
+    base_rtsp_url = get_rtsp_link_from_db()
+    
+    rtsp_url = get_playback_rtsp_link(base_rtsp_url, datetime_str)
+    print("Playback RTSP URL:", rtsp_url)
+    stream_generator = StreamGenerator(rtsp_url)
+    return Response(stream_generator.generate_frames(), mimetype='multipart/x-mixed-replace; boundary=frame')
+
+@appData.route('/device/api/v1/service/restart')
+def restart_service():
+    def delayed_reboot():
+        time.sleep(3)
+        subprocess.run(["sudo", "reboot"])
+
+    # Start the delayed reboot in a separate thread
+    threading.Thread(target=delayed_reboot).start()
+    return jsonify({'result': 'Device will reset in 3 seconds'})

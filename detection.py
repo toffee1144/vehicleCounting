@@ -16,7 +16,6 @@ previous_centers = {}
 # These globals will be used by both detection and the Flask app.
 frame_lock = threading.Lock()
 current_frame = None
-
 class HailoDetectionApp:
     def __init__(self, rtsp_url):
         self.rtsp_url = rtsp_url
@@ -291,6 +290,40 @@ class HailoDetectionApp:
             self.pipeline.set_state(Gst.State.NULL)
         if hasattr(self, 'loop'):
             self.loop.quit()
+
+class StreamGenerator:
+    def __init__(self, rtsp_url):
+        self.rtsp_url = rtsp_url
+
+    def gstreamer_pipeline(self):
+        return (
+            f"rtspsrc location={self.rtsp_url} latency=50 drop-on-latency=true ! "
+            f"rtph264depay ! h264parse ! avdec_h264 ! videoconvert ! appsink sync=false"
+        )
+
+    def generate_frames(self):
+        cap = cv2.VideoCapture(self.gstreamer_pipeline(), cv2.CAP_GSTREAMER)
+        
+        if not cap.isOpened():
+            print("Error: Couldn't open RTSP stream. Check the URL, credentials, and network connectivity.")
+            return
+        
+        while True:
+            success, frame = cap.read()
+            if not success:
+                print("Warning: Failed to retrieve frame from stream. Retrying...")
+                cap.release()
+                cap = cv2.VideoCapture(self.gstreamer_pipeline(), cv2.CAP_GSTREAMER)
+                if not cap.isOpened():
+                    print("Error: Couldn't reopen RTSP stream.")
+                    break
+                continue
+            _, buffer = cv2.imencode('.jpg', frame)
+            frame_bytes = buffer.tobytes()
+            yield (b'--frame\r\n'
+                   b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
+        
+        cap.release()
 
 def generate_frames():
     global current_frame

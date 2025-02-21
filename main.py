@@ -26,6 +26,10 @@ def main():
     hailo_thread = threading.Thread(target=hailo_app.run, daemon=True)
     hailo_thread.start()
 
+    # stream_app = SimpleStream(rtsp_link)
+    # stream_thread = threading.Thread(target=stream_app.run, daemon=True)
+    # stream_thread.start()
+
     # Start the video streaming Flask app on port 5000.
     video_thread = threading.Thread(target=run_video_app, daemon=True)
     video_thread.start()

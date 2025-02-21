@@ -121,3 +121,70 @@ def get_rtsp_link_from_db():
         print("Error retrieving RTSP link from database:", e)
         return None
     
+def get_playback_rtsp_link(url: str, datetime_str: str):
+    if not url:
+        return "RTSP link not found in the database", 404
+    
+    jakarta_tz = pytz.timezone("Asia/Jakarta")
+    gmt_tz = pytz.timezone("GMT")
+
+    dt_jakarta = jakarta_tz.localize(datetime.datetime.fromisoformat(datetime_str))
+    dt_gmt = dt_jakarta.astimezone(gmt_tz)
+    
+    # Convert datetime to the required format
+    formatted_datetime = dt_gmt.strftime('%Y%m%dT%H%M%SZ')
+    
+    # Construct the RTSP URL dynamically
+    return f"{url.replace('/Channels/', '/tracks/')}/?starttime={formatted_datetime}"
+
+def get_data_all():
+    try:
+        conn = mysql.connector.connect(
+            host="localhost",
+            user="root",
+            password="telkomiot123",
+            database="AI_Vehicle"
+        )
+        cursor = conn.cursor(dictionary=True)
+        cursor.execute("SELECT * FROM counting")  # Adjust the table name if needed
+        rows = cursor.fetchall()
+        cursor.close()
+        conn.close()
+        return rows
+    except Exception as e:
+        print("Error retrieving vehicle data from database:", e)
+        return []
+    
+## 
+
+def get_data_summary():
+    # Establish the database connection.
+    conn = mysql.connector.connect(
+        host="localhost",
+        user="root",
+        password="telkomiot123",
+        database="AI_Vehicle"
+    )
+    cursor = conn.cursor(dictionary=True)
+    
+    # Get the 'date' query parameter if provided.
+    
+    # Prepare the SQL query. If a date is provided, use it; otherwise, use CURDATE().
+    query = """
+        SELECT 
+            SUM(car) AS total_car,
+            SUM(bus) AS total_bus,
+            SUM(motorcycle) AS total_motorcycle,
+            SUM(truck) AS total_truck
+        FROM counting
+        WHERE DATE(time) = CURDATE()
+    """
+    cursor.execute(query)
+    
+    result = cursor.fetchone()
+    
+    # Close the database connection.
+    cursor.close()
+    conn.close()
+    return result
+
