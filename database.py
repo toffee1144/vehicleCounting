@@ -2,6 +2,10 @@ import time
 import datetime
 import pytz
 import mysql.connector
+import paho.mqtt.client as mqtt
+import threading
+import json
+from decimal import Decimal
 
 # Set timezone
 jakarta_tz = pytz.timezone("Asia/Jakarta")
@@ -188,3 +192,71 @@ def get_data_summary():
     conn.close()
     return result
 
+def get_latest_data():
+    """Retrieve the latest data from the database."""
+    try:
+        conn = mysql.connector.connect(
+            host="localhost",
+            user="root",
+            password="telkomiot123",
+            database="AI_Vehicle"
+        )
+        cursor = conn.cursor(dictionary=True)
+        cursor.execute("""
+            SELECT 
+                SUM(car) AS total_car,
+                SUM(bus) AS total_bus,
+                SUM(motorcycle) AS total_motorcycle,
+                SUM(truck) AS total_truck,
+                MAX(time) AS latest_time
+            FROM counting
+        """)
+        summary = cursor.fetchone()
+        
+        cursor.execute("""
+            SELECT car, bus, truck, motorcycle, time
+            FROM counting
+            ORDER BY time DESC
+            LIMIT 1
+        """)
+        last_data = cursor.fetchone()
+        
+        cursor.close()
+        conn.close()
+        
+        if summary and last_data:
+            data = {
+                "total_car": float(summary["total_car"]) if isinstance(summary["total_car"], Decimal) else summary["total_car"],
+                "total_bus": float(summary["total_bus"]) if isinstance(summary["total_bus"], Decimal) else summary["total_bus"],
+                "total_truck": float(summary["total_truck"]) if isinstance(summary["total_truck"], Decimal) else summary["total_truck"],
+                "total_motor": float(summary["total_motorcycle"]) if isinstance(summary["total_motorcycle"], Decimal) else summary["total_motorcycle"],
+                "last_data": {
+                    "car": float(last_data["car"]) if isinstance(last_data["car"], Decimal) else last_data["car"],
+                    "bus": float(last_data["bus"]) if isinstance(last_data["bus"], Decimal) else last_data["bus"],
+                    "truck": float(last_data["truck"]) if isinstance(last_data["truck"], Decimal) else last_data["truck"],
+                    "motor": float(last_data["motorcycle"]) if isinstance(last_data["motorcycle"], Decimal) else last_data["motorcycle"]
+                },
+                "time": last_data["time"].timestamp()  # Convert to timestamp
+            }
+            return data
+        else:
+            return None
+    except Exception as e:
+        print("Error retrieving data from database:", e)
+        return None
+    
+def send_data_via_mqtt():
+    """Send data via MQTT at regular intervals."""
+    client = mqtt.Client()
+    client.connect("36.92.168.180", 7483, 60)
+    
+    def publish_data():
+        data = get_latest_data()
+        if data:
+            client.publish("device/sn/vehicle", json.dumps(data))
+            print("Data sent via MQTT:", data)
+        else:
+            print("No data to send.")
+        threading.Timer(2.0, publish_data).start()
+    
+    publish_data()

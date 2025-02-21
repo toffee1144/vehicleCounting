@@ -235,13 +235,21 @@ class HailoDetectionApp:
                         cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
 
             # Dynamic polygon coloring with blinking.
-            elapsed = time.time() - self.last_detection_time
-            if elapsed < self.blink_duration:
-                num_intervals = int(elapsed / self.blink_interval)
-                blink_state = num_intervals % 2
-                polygon_color = (0, 0, 255) if blink_state == 0 else (0, 255, 0)
+            # New real-time blinking logic:
+            detection_in_polygon = any(
+                self.is_inside_polygon((x1, y1, x2, y2), POLYGON_1)
+                for (x1, y1, x2, y2, label, score, object_id) in self.detections
+            )
+            if detection_in_polygon:
+                blink_period = self.blink_interval  # e.g., 0.15 seconds
+                # The modulo creates a cycle, switching color every blink_period seconds.
+                if (time.time() % (blink_period * 2)) < blink_period:
+                    polygon_color = (0, 0, 255)  # Blinking color 1
+                else:
+                    polygon_color = (0, 255, 0)  # Blinking color 2
             else:
                 polygon_color = (0, 255, 0)
+                
             cv2.polylines(frame, [POLYGON_1], isClosed=True, color=polygon_color, thickness=2)
 
             with frame_lock:

@@ -97,6 +97,14 @@ def playback_stream(playback_id):
     stream_generator = StreamGenerator(rtsp_url)
     return Response(stream_generator.generate_frames(), mimetype='multipart/x-mixed-replace; boundary=frame')
 
+@appData.route('/device/api/v1/stream/playback/list', methods=['GET'])
+def list_playback_links():
+    playback_list = [
+        {'playback_id': playback_id, 'datetime': info['datetime']}
+        for playback_id, info in playback_links.items()
+    ]
+    return jsonify(playback_list)
+
 @appData.route('/device/api/v1/service/restart')
 def restart_service():
     def delayed_reboot():

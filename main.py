@@ -2,7 +2,7 @@ import threading
 import time
 import cv2
 from detection import HailoDetectionApp
-from database import get_rtsp_link_from_db, mysql_insertion_loop
+from database import get_rtsp_link_from_db, mysql_insertion_loop, send_data_via_mqtt
 from app import app as video_app, appData as data_app
 
 def run_video_app():
@@ -50,6 +50,10 @@ def main():
     # Start the data API Flask app on port 5001.
     data_thread = threading.Thread(target=run_data_app, daemon=True)
     data_thread.start()
+
+    # Start the MQTT data sending thread.
+    mqtt_thread = threading.Thread(target=send_data_via_mqtt, daemon=True)
+    mqtt_thread.start()
 
     # Keep the main thread alive.
     while True:
