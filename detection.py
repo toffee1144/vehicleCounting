@@ -9,7 +9,7 @@ gi.require_version('Gst', '1.0')
 from gi.repository import Gst, GLib, GObject
 
 # Global variables used for detection.
-POLYGON_1 = np.array([(61, 438), (241, 397), (373, 616), (145, 620)], np.int32)
+POLYGON_1 = np.array([(234, 362), (396, 341), (436, 521), (222, 509)], np.int32)
 counted_ids = {}
 previous_centers = {}
 

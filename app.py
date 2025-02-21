@@ -65,11 +65,15 @@ def playback():
     if request.method == 'POST':
         datetime_str = request.form['datetime']
         playback_id = str(uuid.uuid4())
+        expires_at = datetime.datetime.now() + datetime.timedelta(minutes=3)
         playback_links[playback_id] = {
             'datetime': datetime_str,
-            'expires_at': datetime.datetime.now() + datetime.timedelta(minutes=3)
+            'expires_at': expires_at
         }
-        return jsonify({'playback_link': url_for('playback_stream', playback_id=playback_id, _external=True)})
+        return jsonify({
+            'playback_link': url_for('playback_stream', playback_id=playback_id, _external=True),
+            'expires_at': expires_at.isoformat()
+        })
     return '''
         <form method="post">
             DateTime: <input type="datetime-local" name="datetime">

@@ -28,7 +28,12 @@ def get_uptime():
     days, remainder = divmod(uptime_seconds, 86400)
     hours, remainder = divmod(remainder, 3600)
     minutes, seconds = divmod(remainder, 60)
-    return int(days), int(hours), int(minutes), int(seconds)
+    return {
+        'days': int(days),
+        'hours': int(hours),
+        'minutes': int(minutes),
+        'seconds': int(seconds)
+    }
 
 def get_memory_info():
     """
@@ -182,9 +187,16 @@ def get_hailo_device_info():
     return device_info
 
 def get_speed_test():
-    
     command = ["speedtest", "--format=json"]
     result = subprocess.run(command, capture_output=True, text=True, check=True)
     data = json.loads(result.stdout)
 
-    return data
+    download_bandwidth = data['download']['bandwidth'] * 8 / 1_000_000  # Convert to Mbps
+    upload_bandwidth = data['upload']['bandwidth'] * 8 / 1_000_000  # Convert to Mbps
+
+    summary = {
+        'download_mbps': download_bandwidth,
+        'upload_mbps': upload_bandwidth
+    }
+
+    return data, summary
