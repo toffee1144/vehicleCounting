@@ -204,10 +204,10 @@ def get_latest_data():
         cursor = conn.cursor(dictionary=True)
         cursor.execute("""
             SELECT 
-                SUM(car) AS total_car,
-                SUM(bus) AS total_bus,
-                SUM(motorcycle) AS total_motorcycle,
-                SUM(truck) AS total_truck,
+                CAST(SUM(car) AS UNSIGNED) AS total_car,
+                CAST(SUM(bus) AS UNSIGNED) AS total_bus,
+                CAST(SUM(motorcycle) AS UNSIGNED) AS total_motorcycle,
+                CAST(SUM(truck) AS UNSIGNED) AS total_truck,
                 MAX(time) AS latest_time
             FROM counting
         """)
@@ -226,15 +226,15 @@ def get_latest_data():
         
         if summary and last_data:
             data = {
-                "total_car": float(summary["total_car"]) if isinstance(summary["total_car"], Decimal) else summary["total_car"],
-                "total_bus": float(summary["total_bus"]) if isinstance(summary["total_bus"], Decimal) else summary["total_bus"],
-                "total_truck": float(summary["total_truck"]) if isinstance(summary["total_truck"], Decimal) else summary["total_truck"],
-                "total_motor": float(summary["total_motorcycle"]) if isinstance(summary["total_motorcycle"], Decimal) else summary["total_motorcycle"],
+                "total_car": summary["total_car"],
+                "total_bus": summary["total_bus"],
+                "total_truck": summary["total_truck"],
+                "total_motor": summary["total_motorcycle"],
                 "last_data": {
-                    "car": float(last_data["car"]) if isinstance(last_data["car"], Decimal) else last_data["car"],
-                    "bus": float(last_data["bus"]) if isinstance(last_data["bus"], Decimal) else last_data["bus"],
-                    "truck": float(last_data["truck"]) if isinstance(last_data["truck"], Decimal) else last_data["truck"],
-                    "motor": float(last_data["motorcycle"]) if isinstance(last_data["motorcycle"], Decimal) else last_data["motorcycle"]
+                    "car": last_data["car"],
+                    "bus": last_data["bus"],
+                    "truck": last_data["truck"],
+                    "motor": last_data["motorcycle"]
                 },
                 "time": last_data["time"].timestamp()  # Convert to timestamp
             }
