@@ -1,8 +1,6 @@
-from flask import Flask, Response, jsonify, request, url_for
+from flask import Flask, Response, jsonify, render_template, request, url_for, send_from_directory
 import cv2
-from detection import generate_frames, StreamGenerator
 import devInfo
-import mysql.connector
 import platform
 import datetime
 import uuid
@@ -11,15 +9,21 @@ from database import get_rtsp_link_from_db, get_data_all, get_data_summary, get_
 import subprocess
 import threading
 import time
+from detection import StreamGenerator
 
-app = Flask(__name__)
+app = Flask(__name__, static_folder='hls')
 appData = Flask(__name__)
 
 playback_links = {}
 
-@app.route('/device/api/v1/stream/live')
-def video_feed():
-    return Response(generate_frames(), mimetype='multipart/x-mixed-replace; boundary=frame')
+@app.route('/')
+def index():
+    return send_from_directory(app.static_folder, 'index.html')
+
+# Serve playlist and segments from the same directory.
+@app.route('/hls/<path:filename>')
+def hls_files(filename):
+    return send_from_directory(app.static_folder, filename)
 
 @appData.route('/device/api/v1/disk', methods=['GET'])
 def get_disk_info():

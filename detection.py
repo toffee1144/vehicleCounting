@@ -4,6 +4,7 @@ import numpy as np
 import threading
 import gi
 import hailo  # Make sure the Hailo SDK is installed and accessible
+from devInfo import delete_hls_file
 
 gi.require_version('Gst', '1.0')
 from gi.repository import Gst, GLib, GObject
@@ -42,6 +43,15 @@ class HailoDetectionApp:
 
         Gst.init(None)
         self.create_pipeline()
+            
+    def get_vehicle_data(self):
+        """Return the current vehicle counts."""
+        return {
+            "car": self.car_crossed_count,
+            "truck": self.truck_crossed_count,
+            "bus": self.bus_crossed_count,
+            "motorcycle": self.motorcycle_crossed_count
+        }
 
     def create_pipeline(self):
         if hasattr(self, 'pipeline'):
@@ -332,6 +342,47 @@ class StreamGenerator:
                    b'Content-Type: image/jpeg\r\n\r\n' + frame_bytes + b'\r\n')
         
         cap.release()
+
+# NEW: Instead of re-encoding each frame to JPEG, we now encode it to H264.
+def run_hls_pipeline():
+    delete_hls_file()
+    # Define the GStreamer pipeline string.
+    pipeline_str = (
+        "appsrc name=src is-live=true block=true format=time ! "
+        "videoconvert ! video/x-raw,format=I420,width=1280,height=720 ! "
+        "x264enc tune=zerolatency bitrate=1024 speed-preset=veryfast ! "
+        "h264parse config-interval=1 ! "
+        "mpegtsmux ! "
+        "hlssink location=./hls/segment%05d.ts playlist-location=./hls/playlist.m3u8 target-duration=1 max-files=4"
+    )
+    pipeline = Gst.parse_launch(pipeline_str)
+    appsrc = pipeline.get_by_name("src")
+    pipeline.set_state(Gst.State.PLAYING)
+    
+    # Set the caps for appsrc so that it knows our frame format.
+    caps = Gst.Caps.from_string("video/x-raw,format=BGR,width=1280,height=720")
+    appsrc.set_property("caps", caps)
+    
+    while True:
+        # Get the most recent frame from your detection pipeline.
+        with frame_lock:
+            if current_frame is None:
+                continue
+            frame = current_frame.copy()
+        # Convert frame to raw bytes.
+        data = frame.tobytes()
+        buf = Gst.Buffer.new_allocate(None, len(data), None)
+        buf.fill(0, data)
+        buf.pts = int(time.time() * Gst.SECOND)
+        buf.duration = Gst.SECOND // 30  # Assuming ~30 fps
+        
+        # Push the frame into the pipeline.
+        ret = appsrc.emit("push-buffer", buf)
+        if ret != Gst.FlowReturn.OK:
+            print("Error pushing buffer into HLS pipeline:", ret)
+        time.sleep(1/20)  # Sleep to maintain ~30 fps
+
+    pipeline.set_state(Gst.State.NULL)
 
 def generate_frames():
     global current_frame

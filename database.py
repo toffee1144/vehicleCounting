@@ -13,6 +13,12 @@ jakarta_tz = pytz.timezone("Asia/Jakarta")
 # Global offline data buffer in case the database connection fails.
 offline_data = []
 
+prev_counts = {
+    "car": 0,
+    "motorcycle": 0,
+    "bus": 0,
+    "truck": 0,
+}
 def flush_offline_data(cursor, conn):
     """Attempt to flush any stored offline data to the database."""
     global offline_data
@@ -44,7 +50,7 @@ def handle_database_error(car, motorcycle, bus, truck, current_timestamp):
 def mysql_insertion_loop(app_instance):
     """Continuously insert count data into the MySQL database every 5 seconds."""
     while True:
-        time.sleep(5)
+        time.sleep(60)
         car = app_instance.car_crossed_count
         motorcycle = app_instance.motorcycle_crossed_count
         bus = app_instance.bus_crossed_count
@@ -193,7 +199,7 @@ def get_data_summary():
     return result
 
 def get_latest_data():
-    """Retrieve the latest data from the database."""
+    """Retrieve the total all-time and today's data from the database."""
     try:
         conn = mysql.connector.connect(
             host="localhost",
@@ -202,61 +208,98 @@ def get_latest_data():
             database="AI_Vehicle"
         )
         cursor = conn.cursor(dictionary=True)
+        
+        # Query for all-time totals
         cursor.execute("""
             SELECT 
                 CAST(SUM(car) AS UNSIGNED) AS total_car,
                 CAST(SUM(bus) AS UNSIGNED) AS total_bus,
                 CAST(SUM(motorcycle) AS UNSIGNED) AS total_motorcycle,
-                CAST(SUM(truck) AS UNSIGNED) AS total_truck,
-                MAX(time) AS latest_time
+                CAST(SUM(truck) AS UNSIGNED) AS total_truck
             FROM counting
         """)
-        summary = cursor.fetchone()
+        total_all = cursor.fetchone()
         
+        # Query for today's totals (using CURDATE() to match records from today)
         cursor.execute("""
-            SELECT car, bus, truck, motorcycle, time
+            SELECT 
+                CAST(SUM(car) AS UNSIGNED) AS total_car,
+                CAST(SUM(bus) AS UNSIGNED) AS total_bus,
+                CAST(SUM(motorcycle) AS UNSIGNED) AS total_motorcycle,
+                CAST(SUM(truck) AS UNSIGNED) AS total_truck
             FROM counting
-            ORDER BY time DESC
-            LIMIT 1
+            WHERE DATE(time) = CURDATE()
         """)
-        last_data = cursor.fetchone()
-        
+        total_today = cursor.fetchone()
+
+        cursor.execute("""
+            SELECT 
+                serialNumber AS sn,
+                name as deviceName
+            FROM deviceInfo
+        """)
+        device_info = cursor.fetchone()
+
         cursor.close()
         conn.close()
         
-        if summary and last_data:
-            data = {
-                "total_car": summary["total_car"],
-                "total_bus": summary["total_bus"],
-                "total_truck": summary["total_truck"],
-                "total_motor": summary["total_motorcycle"],
-                "last_data": {
-                    "car": last_data["car"],
-                    "bus": last_data["bus"],
-                    "truck": last_data["truck"],
-                    "motor": last_data["motorcycle"]
-                },
-                "time": last_data["time"].timestamp()  # Convert to timestamp
+        # Ensure that if any of the values are None (no records), they default to 0.
+        data = {
+            "sn": device_info["sn"],  # SN from the database.
+            "name": device_info["deviceName"],
+            "total_all": {
+                "car": total_all["total_car"] if total_all["total_car"] is not None else 0,
+                "bus": total_all["total_bus"] if total_all["total_bus"] is not None else 0,
+                "truck": total_all["total_truck"] if total_all["total_truck"] is not None else 0,
+                "motor": total_all["total_motorcycle"] if total_all["total_motorcycle"] is not None else 0
+            },
+            "total_today": {
+                "car": total_today["total_car"] if total_today["total_car"] is not None else 0,
+                "bus": total_today["total_bus"] if total_today["total_bus"] is not None else 0,
+                "truck": total_today["total_truck"] if total_today["total_truck"] is not None else 0,
+                "motor": total_today["total_motorcycle"] if total_today["total_motorcycle"] is not None else 0
             }
-            return data
-        else:
-            return None
+        }
+        return data
     except Exception as e:
         print("Error retrieving data from database:", e)
         return None
-    
-def send_data_via_mqtt():
-    """Send data via MQTT at regular intervals."""
+
+def send_data_via_mqtt(app_instance):
+    """Send data via MQTT at regular intervals using difference of cumulative counts."""
     client = mqtt.Client()
     client.connect("36.92.168.180", 7483, 60)
     
     def publish_data():
         data = get_latest_data()
         if data:
-            client.publish("device/sn/vehicle", json.dumps(data))
-            print("Data sent via MQTT:", data)
+            # Calculate the difference between current counts and previous counts.
+            delta_car = app_instance.car_crossed_count - prev_counts["car"]
+            delta_motorcycle = app_instance.motorcycle_crossed_count - prev_counts["motorcycle"]
+            delta_bus = app_instance.bus_crossed_count - prev_counts["bus"]
+            delta_truck = app_instance.truck_crossed_count - prev_counts["truck"]
+            
+            # Include the difference in the payload.
+            data["total_5_second"] = {
+                "car": delta_car,
+                "motorcycle": delta_motorcycle,
+                "bus": delta_bus,
+                "truck": delta_truck,
+                "timestamp": datetime.datetime.now(jakarta_tz).isoformat()
+            }
+            # Format the topic using the SN from the data.
+            topic = f"device/{data['sn']}/vehicle"
+            
+            # Update previous counts for the next iteration.
+            prev_counts["car"] = app_instance.car_crossed_count
+            prev_counts["motorcycle"] = app_instance.motorcycle_crossed_count
+            prev_counts["bus"] = app_instance.bus_crossed_count
+            prev_counts["truck"] = app_instance.truck_crossed_count
         else:
-            print("No data to send.")
-        threading.Timer(2.0, publish_data).start()
+            topic = "device/unknown/vehicle"
+        
+        client.publish(topic, json.dumps(data))
+        print("Data sent via MQTT on topic", topic, ":", data)
+        threading.Timer(5.0, publish_data).start()
     
     publish_data()

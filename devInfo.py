@@ -7,6 +7,8 @@ import socket
 import platform
 import subprocess
 import json
+import glob
+import os
 
 def __init__(update_interval=1):
     """
@@ -200,3 +202,27 @@ def get_speed_test():
     }
 
     return data, summary
+
+def delete_hls_file():
+    hls_dir = "./hls"
+    
+    # Create the directory if it doesn't exist.
+    if not os.path.exists(hls_dir):
+        os.makedirs(hls_dir)
+    else:
+        # Delete any old HLS segment files.
+        for segment_file in glob.glob(os.path.join(hls_dir, "segment*.ts")):
+            try:
+                os.remove(segment_file)
+                print(f"Deleted old segment: {segment_file}")
+            except Exception as e:
+                print(f"Error deleting {segment_file}: {e}")
+                
+        # Delete the playlist if it exists.
+        playlist_file = os.path.join(hls_dir, "playlist.m3u8")
+        if os.path.exists(playlist_file):
+            try:
+                os.remove(playlist_file)
+                print("Deleted old playlist file.")
+            except Exception as e:
+                print(f"Error deleting {playlist_file}: {e}")
