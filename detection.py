@@ -5,6 +5,7 @@ import threading
 import gi
 import hailo  # Make sure the Hailo SDK is installed and accessible
 from devInfo import delete_hls_file
+import logging
 
 gi.require_version('Gst', '1.0')
 from gi.repository import Gst, GLib, GObject
@@ -17,6 +18,7 @@ previous_centers = {}
 # These globals will be used by both detection and the Flask app.
 frame_lock = threading.Lock()
 current_frame = None
+
 class HailoDetectionApp:
     def __init__(self, rtsp_url):
         self.rtsp_url = rtsp_url
@@ -34,12 +36,10 @@ class HailoDetectionApp:
         self.bus_crossed_count = 0  
         self.motorcycle_crossed_count = 0
         self.frame_count = 0  
-        self.blink_status = False  
-        self.last_detection_time = 0
-        self.blink_duration = 0.15  
-        self.blink_interval = 0.15
-        self.running = True
         self.reconnecting = False  # Flag to track reconnection status
+
+        # For blinking on a new count (blink only one frame)
+        self.blink_once = False
 
         Gst.init(None)
         self.create_pipeline()
@@ -158,6 +158,19 @@ class HailoDetectionApp:
                 return True
         return False
 
+    def get_polygon_color(self):
+        """
+        Return a polygon color.
+        If a new detection has been counted (blink_once is True),
+        return the blink color and then reset the flag.
+        Otherwise, return the normal color.
+        """
+        if self.blink_once:
+            # Reset the flag so that the blink shows only one frame.
+            self.blink_once = False
+            return (0, 0, 255)  # Blink color (red)
+        return (0, 255, 0)      # Default color (green)
+
     def on_new_sample(self, sink):
         if self.reconnecting or not self.pipeline:
             return Gst.FlowReturn.OK
@@ -180,7 +193,7 @@ class HailoDetectionApp:
             if current_state != Gst.State.PLAYING:
                 return Gst.FlowReturn.OK
 
-            # Process frame only if pipeline is active
+            # Process frame only if pipeline is active.
             frame = np.ndarray(
                 shape=(720, 1280, 3),
                 dtype=np.uint8,
@@ -212,11 +225,12 @@ class HailoDetectionApp:
                 if object_id is not None:
                     self.detections.append((x1, y1, x2, y2, label, confidence, object_id))
 
+                # When a new detection is inside the polygon, update counts and trigger a one-time blink.
                 if self.is_inside_polygon((x1, y1, x2, y2), POLYGON_1):
                     if object_id not in counted_ids:
                         counted_ids[object_id] = True
-                        self.blink_status = True
-                        self.last_detection_time = time.time()
+                        # Trigger a one-frame blink.
+                        self.blink_once = True
                         if "car" in label.lower():
                             self.car_crossed_count += 1
                         elif "truck" in label.lower():
@@ -232,6 +246,7 @@ class HailoDetectionApp:
                     previous_centers.pop(obj_id, None)
                     counted_ids.pop(obj_id, None)
             self.frame_count += 1
+
             self.draw_detections(frame)
 
             # Display counts on the frame.
@@ -244,22 +259,8 @@ class HailoDetectionApp:
             cv2.putText(frame, f"Motorcycles: {self.motorcycle_crossed_count}", (10, 140),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
 
-            # Dynamic polygon coloring with blinking.
-            # New real-time blinking logic:
-            detection_in_polygon = any(
-                self.is_inside_polygon((x1, y1, x2, y2), POLYGON_1)
-                for (x1, y1, x2, y2, label, score, object_id) in self.detections
-            )
-            if detection_in_polygon:
-                blink_period = self.blink_interval  # e.g., 0.15 seconds
-                # The modulo creates a cycle, switching color every blink_period seconds.
-                if (time.time() % (blink_period * 2)) < blink_period:
-                    polygon_color = (0, 0, 255)  # Blinking color 1
-                else:
-                    polygon_color = (0, 255, 0)  # Blinking color 2
-            else:
-                polygon_color = (0, 255, 0)
-                
+            # Use the new function to decide the polygon color (blink only one frame when triggered).
+            polygon_color = self.get_polygon_color()
             cv2.polylines(frame, [POLYGON_1], isClosed=True, color=polygon_color, thickness=2)
 
             with frame_lock:
@@ -271,7 +272,6 @@ class HailoDetectionApp:
             except Exception as e:
                 print(f"Hailo processing error: {str(e)}")
                 return Gst.FlowReturn.ERROR
-
 
         except Exception as e:
             print(f"Frame processing error: {str(e)}")
@@ -343,9 +343,10 @@ class StreamGenerator:
         
         cap.release()
 
-# NEW: Instead of re-encoding each frame to JPEG, we now encode it to H264.
 def run_hls_pipeline():
-    delete_hls_file()
+    logging.basicConfig(filename='/home/pi/Documents/vehicleCounting/hls_pipeline.log', level=logging.DEBUG)
+    logging.info("Starting HLS pipeline...")
+
     # Define the GStreamer pipeline string.
     pipeline_str = (
         "appsrc name=src is-live=true block=true format=time ! "
@@ -353,7 +354,9 @@ def run_hls_pipeline():
         "x264enc tune=zerolatency bitrate=1024 speed-preset=veryfast ! "
         "h264parse config-interval=1 ! "
         "mpegtsmux ! "
-        "hlssink location=./hls/segment%05d.ts playlist-location=./hls/playlist.m3u8 target-duration=1 max-files=4"
+        "hlssink location=/home/pi/Documents/vehicleCounting/hls/segment%05d.ts "
+        "playlist-location=/home/pi/Documents/vehicleCounting/hls/playlist.m3u8 "
+        "target-duration=1 max-files=4"
     )
     pipeline = Gst.parse_launch(pipeline_str)
     appsrc = pipeline.get_by_name("src")
@@ -379,11 +382,14 @@ def run_hls_pipeline():
         # Push the frame into the pipeline.
         ret = appsrc.emit("push-buffer", buf)
         if ret != Gst.FlowReturn.OK:
-            print("Error pushing buffer into HLS pipeline:", ret)
+            logging.error(f"Error pushing buffer into HLS pipeline: {ret}")
         time.sleep(1/20)  # Sleep to maintain ~30 fps
 
-    pipeline.set_state(Gst.State.NULL)
 
+    pipeline.set_state(Gst.State.NULL)
+    logging.info("HLS pipeline stopped.")
+    #If HLS not run, chmod -R 755 to the hls folder
+    
 def generate_frames():
     global current_frame
     while True:

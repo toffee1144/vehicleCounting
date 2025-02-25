@@ -16,7 +16,7 @@ appData = Flask(__name__)
 
 playback_links = {}
 
-@app.route('/')
+@app.route('/device/api/v1/stream/live')
 def index():
     return send_from_directory(app.static_folder, 'index.html')
 
